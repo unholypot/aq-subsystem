@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+
 """Manual Enviro+ LCD controller. Reads the sensor loop's RAM snapshot.
+
 No sensor/I2C reads, HTTP server or boot configuration. Frame page is a placeholder.
+
 """
 
 import argparse
@@ -11,12 +14,18 @@ import queue
 import signal
 import subprocess
 import time
+
 from datetime import datetime, timezone
+
+
 from PIL import Image, ImageDraw, ImageFont
 
 PAGES = ("ip", "environment", "gas", "frame")
+
 COMMAND_TOPIC = "gcs/aq/display/set"
+
 STATE_TOPIC = "gcs/aq/display/state"
+
 SNAPSHOT_PATH = "/dev/shm/egh455-aq.json"
 
 
@@ -129,20 +138,26 @@ def font(size, bold=False):
         return ImageFont.load_default()
 
 
-class Renderer:
-    """160x80 high-contrast display, preserving existing content positions."""
+def number(value, digits=1):
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return f"{value:.{digits}f}"
+    return "--"
 
-    BACKGROUND = "#163D75"
+
+class Renderer:
+    """160x80 white-background display, preserving existing text offsets."""
+
+    BACKGROUND = "#FFFFFF"
     PANEL = BACKGROUND
-    TEXT = "#FFFFFF"
-    MUTED = "#FFFFFF"
+    TEXT = "#17324F"
+    MUTED = "#253746"
     LINE = BACKGROUND
     ACCENTS = {
-        "ip": "#60CFFF",
-        "environment": "#57E3B1",
-        "gas": "#FFC66B",
-        "frame": "#C2A2FF",
-    }
+    "ip": "#00509E",           # Dark blue
+    "environment": "#006B45",  # Dark green
+    "gas": "#9A4B00",          # Dark orange
+    "frame": "#65319C"         # Dark purple
+}
     # All important text sits to the right of the vertical stripe in the photos.
     LEFT, RIGHT = 31, 155
 
@@ -348,7 +363,7 @@ class Renderer:
                     max_width=86,
                 )
         # The connectivity indicator describes MQTT, not air quality.
-        status = "#FFFFFF" if connected else "#BDD1EE"
+        status = "#26734D" if connected else "#A85426"
         draw.ellipse((32, 72, 35, 75), fill=status)
         self.text(
             draw,
@@ -364,7 +379,7 @@ class Renderer:
             draw.rounded_rectangle(
                 (x, 72, x + 5, 75),
                 radius=1,
-                fill=accent if PAGES[index] == page else "#7FA4CF",
+                fill=accent if PAGES[index] == page else "#B6C4D1",
             )
         if image.size != (self.width, self.height):
             image = image.resize((self.width, self.height), Image.Resampling.NEAREST)
@@ -501,8 +516,7 @@ def main():
                     events.append(commands.get_nowait())
                 except queue.Empty:
                     break
-
-            # Process commands and physical gestures in the order they occurred.
+            # Process older queued events first so stale commands cannot override newer ones.
             for event_time, target, event_source, event_id in sorted(
                 events, key=lambda item: item[0]
             ):
