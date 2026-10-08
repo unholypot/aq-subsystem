@@ -12,7 +12,6 @@ Gas values are estimates using the supplied constants, not verified calibration.
 Gas telemetry is null for the first 15 minutes; the receiver must handle null
 as unavailable, not zero. CSV keeps raw measurements and provisional estimates.
 Disconnected samples stay in CSV; they are not replayed to the live dashboard.
-Also writes a local RAM snapshot for the separate lcdcontroller.py process.
 """
 
 import argparse
@@ -21,9 +20,6 @@ import json
 import math
 import os
 import time
-import tempfile
-import uuid
-import signal
 from datetime import datetime, timezone
 
 MQTT_BROKER = "10.88.35.39"
@@ -159,88 +155,11 @@ def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
         print(f"[MQTT] Disconnected: {reason_code}; reconnecting automatically")
 
 
-SNAPSHOT_PATH = "/dev/shm/egh455-aq.json"
-
-
-class ProximityGesture:
-    """One event per approach; first observe a released hand to arm."""
-    def __init__(self, high=1500, low=800):
-        if not 0 <= low < high:
-            raise ValueError("Require 0 <= proximity low < high")
-        self.high, self.low = high, low
-        self.armed = False
-        self.count = 0
-        self.last_event_time = None
-
-    def update(self, value, now):
-        if not isinstance(value, (int, float)) or not math.isfinite(value):
-            self.armed = False
-            return False
-        if value <= self.low:
-            self.armed = True
-        elif value >= self.high and self.armed:
-            self.armed = False
-            self.count += 1
-            self.last_event_time = now
-            return True
-        return False
-
-
-def write_snapshot(path, reading, remaining, session_id, sequence, sampled_at, gesture):
-    """Atomic replacement: the LCD sees a complete old or new JSON document."""
-    data = {
-        "version": 1, "session_id": session_id, "sequence": sequence,
-        "sampled_monotonic": sampled_at,
-        "gas_warmup_remaining_s": max(0, remaining),
-        "gesture_count": gesture.count, "gesture_time": gesture.last_event_time,
-        "reading": {key: value if isinstance(value, str) else finite_or_none(value)
-                    for key, value in reading.items()},
-    }
-    directory = os.path.dirname(os.path.abspath(path))
-    fd, temporary = tempfile.mkstemp(prefix=".aq-", dir=directory)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(data, stream, allow_nan=False)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def acquire_lock(path):
-    import fcntl
-    handle = open(path, "a")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.close()
-        raise SystemExit("Another sensorloop using this snapshot is already running")
-    return handle
-
-
-def terminate(signum, frame):
-    raise KeyboardInterrupt
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--broker", default=os.getenv("MQTT_BROKER", MQTT_BROKER))
     parser.add_argument("--port", type=int, default=MQTT_PORT)
-    parser.add_argument("--snapshot", default=SNAPSHOT_PATH)
-    parser.add_argument("--proximity-high", type=int, default=1500)
-    parser.add_argument("--proximity-low", type=int, default=800)
     args = parser.parse_args()
-    if not 0 <= args.proximity_low < args.proximity_high:
-        parser.error("Require 0 <= --proximity-low < --proximity-high")
-    instance_lock = acquire_lock(args.snapshot + ".sensor.lock")
-    signal.signal(signal.SIGTERM, terminate)
-    gesture = ProximityGesture(args.proximity_high, args.proximity_low)
-    session_id = uuid.uuid4().hex
-    sequence = 0
-    try:
-        os.unlink(args.snapshot)
-    except FileNotFoundError:
-        pass
 
     # Hardware imports here allow payload checks on a computer without Enviro+.
     from smbus2 import SMBus
@@ -270,7 +189,6 @@ def main():
         start_time = time.monotonic()
         last_offline_notice = -math.inf
         print(f"Starting sensor loop. CSV: {LOG_PATH}")
-        print(f"LCD snapshot: {args.snapshot}; move hand away first, then approach")
         print("Gas telemetry is null during the 15-minute warm-up. Ctrl+C stops.")
         while True:
             loop_start = time.monotonic()
@@ -278,17 +196,9 @@ def main():
             reading.update(safe_read("BME280", lambda: read_bme280(bme280), BME_DEFAULTS))
             reading.update(safe_read("LTR559", lambda: read_light(ltr559), LIGHT_DEFAULTS))
             reading.update(safe_read("MiCS-6814", lambda: read_gas(gas), GAS_DEFAULTS))
-            if gesture.update(reading.get("proximity"), time.monotonic()):
-                print(f"[PROXIMITY] Next screen (event {gesture.count})")
             elapsed = time.monotonic() - start_time
             gas_ready = elapsed >= GAS_WARMUP_SECONDS
             telemetry = build_telemetry(reading, gas_ready)
-            sequence += 1
-            try:
-                write_snapshot(args.snapshot, reading, GAS_WARMUP_SECONDS - elapsed,
-                               session_id, sequence, loop_start, gesture)
-            except (OSError, ValueError) as exc:
-                print(f"[WARNING] LCD snapshot failed: {exc}")
             payload = json.dumps(telemetry, allow_nan=False)
             print(payload)
             if not gas_ready:
@@ -314,11 +224,6 @@ def main():
             mqtt_client.disconnect()
             mqtt_client.loop_stop()
         bus.close()
-        try:
-            os.unlink(args.snapshot)
-        except FileNotFoundError:
-            pass
-        instance_lock.close()
 
 
 if __name__ == "__main__":
