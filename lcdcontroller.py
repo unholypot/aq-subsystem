@@ -2,7 +2,7 @@
 
 """Manual Enviro+ LCD controller. Reads the sensor loop's RAM snapshot.
 
-No sensor/I2C reads, HTTP server or boot configuration. Frame page is a placeholder.
+No sensor/I2C reads, HTTP server or boot configuration. Frame page displays MQTT snapshots.
 
 """
 
@@ -19,6 +19,12 @@ from datetime import datetime, timezone
 
 
 from PIL import Image, ImageDraw, ImageFont
+import base64
+import io
+
+from PIL import ImageOps
+
+DETECTION_TOPIC = "gcs/detection"
 
 PAGES = ("ip", "environment", "gas", "frame")
 
@@ -75,6 +81,32 @@ def load_snapshot(path, now):
     except (OSError, ValueError, TypeError):
         return None
 
+
+def decode_snapshot(payload):
+    """Accept raw JPEG/PNG or JSON with an image_base64 field."""
+    if len(payload) > 4_000_000:
+        raise ValueError("Snapshot payload exceeds 4 MB")
+
+    if payload.lstrip().startswith(b"{"):
+        message = json.loads(payload)
+        encoded = message.get("image_base64")
+        if not isinstance(encoded, str):
+            raise ValueError("Detection message has no image_base64 field")
+
+        # Also accept data:image/jpeg;base64,... format.
+        if encoded.startswith("data:"):
+            encoded = encoded.split(",", 1)[1]
+
+        payload = base64.b64decode(encoded, validate=True)
+
+    with Image.open(io.BytesIO(payload)) as source:
+        if source.width * source.height > 8_000_000:
+            raise ValueError("Snapshot exceeds 8 megapixels")
+        frame = ImageOps.exif_transpose(source).convert("RGB")
+
+    return ImageOps.contain(
+        frame, (124, 50), method=Image.Resampling.LANCZOS
+    )
 
 class GestureCursor:
     """Ignore past gestures on controller start, sensor restart or stale recovery."""
@@ -169,6 +201,7 @@ class Renderer:
         self.last_ip_check = -math.inf
         self.addresses = ([], [])
         self.fonts = {}
+        self.snapshot_frame = None
 
     def text(
         self,
@@ -260,12 +293,17 @@ class Renderer:
                 draw, tail[0][1] if tail else "Not connected", 54, size=12, bold=True
             )
         elif page == "frame":
-            # Placeholder only: the annotated image handoff is a separate task.
-            draw.rounded_rectangle((83, 21, 103, 35), radius=2, outline=accent)
-            draw.ellipse((96, 24, 99, 27), fill=accent)
-            draw.line([(86, 32), (91, 27), (95, 31)], fill=accent, width=1)
-            self.center(draw, "Waiting for", 42, size=11, bold=True)
-            self.center(draw, "annotated frame", 55, size=10, colour=self.MUTED)
+            if self.snapshot_frame is not None:
+                frame = self.snapshot_frame
+                x = self.LEFT + (self.RIGHT - self.LEFT - frame.width) // 2
+                y = 18 + (50 - frame.height) // 2
+                image.paste(frame, (x, y))
+            else:
+                draw.rounded_rectangle((83, 21, 103, 35), radius=2, outline=accent)
+                draw.ellipse((96, 24, 99, 27), fill=accent)
+                draw.line([(86, 32), (91, 27), (95, 31)], fill=accent, width=1)
+                self.center(draw, "Waiting for", 42, size=11, bold=True)
+                self.center(draw, "annotated frame", 55, size=10, colour=self.MUTED)
         elif sample_age > 5:
             self.center(
                 draw, "NO SENSOR DATA", 26, size=11, bold=True, colour=self.TEXT
@@ -393,7 +431,7 @@ def create_display():
     import st7735
 
     display = st7735.ST7735(
-        port=0, cs=1, dc="GPIO9", backlight="GPIO12", rotation=270, spi_speed_hz=1000000
+        port=0, cs=1, dc="GPIO9", backlight="GPIO12", rotation=90, spi_speed_hz=1000000
     )
     display.begin()
     return display
@@ -433,7 +471,7 @@ def terminate(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--broker", default=os.getenv("MQTT_BROKER", "10.88.35.39"))
+    parser.add_argument("--broker", default=os.getenv("MQTT_BROKER", "10.88.39.170"))
     parser.add_argument("--port", type=int, default=1883)
     parser.add_argument("--snapshot", default=SNAPSHOT_PATH)
     args = parser.parse_args()
@@ -442,16 +480,18 @@ def main():
     import paho.mqtt.client as mqtt
 
     commands = queue.Queue(maxsize=32)
+    snapshots = queue.Queue(maxsize=1)  
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code != 0:
             print(f"[LCD MQTT] Connection rejected: {reason_code}")
             return
         result, _ = client.subscribe(COMMAND_TOPIC, qos=1)
+        client.subscribe(DETECTION_TOPIC, qos=0)
         print(
             f"[LCD MQTT] Connected to {args.broker}:{args.port}; subscribe result {result}"
         )
-        try:
+        try:    
             commands.put_nowait((time.monotonic(), "refresh", "reconnect", None))
         except queue.Full:
             pass
@@ -463,6 +503,24 @@ def main():
             print(f"[LCD MQTT] Listening on {COMMAND_TOPIC}")
 
     def on_message(client, userdata, message):
+        if message.topic == DETECTION_TOPIC:
+            if message.retain:
+                return  # Wait for a newly published snapshot.
+            if len(message.payload) > 4_000_000:
+                print("[LCD FRAME] Snapshot payload too large")
+                return
+
+            # Keep only the newest pending snapshot.
+            try:
+                snapshots.get_nowait()
+            except queue.Empty:
+                pass
+
+            try:
+                snapshots.put_nowait(message.payload)
+            except queue.Full:
+                pass
+            return
         if message.topic != COMMAND_TOPIC:
             return
         try:
@@ -505,6 +563,16 @@ def main():
         network_started = True
         while True:
             now = time.monotonic()
+            try:
+                snapshot_payload = snapshots.get_nowait()
+            except queue.Empty:
+                snapshot_payload = None
+
+            if snapshot_payload is not None:
+                try:
+                    renderer.snapshot_frame = decode_snapshot(snapshot_payload)
+                except Exception as exc:
+                    print(f"[LCD FRAME] Invalid snapshot: {exc}")
             data = load_snapshot(args.snapshot, now)
             events = []
             advances = cursor.consume(data)

@@ -26,7 +26,7 @@ import uuid
 import signal
 from datetime import datetime, timezone
 
-MQTT_BROKER = "10.88.42.26"
+MQTT_BROKER = "10.88.17.145"
 MQTT_PORT = 1883
 MQTT_TOPIC = "gcs/telemetry"
 COMP_FACTOR = 2.25  # Existing provisional temperature correction, unchanged.
