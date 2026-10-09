@@ -34,15 +34,18 @@ def parse_command(payload, retained=False):
         raise ValueError("Old retained commands are ignored; send with retain=false")
     if len(payload) > 1024:
         raise ValueError("Command exceeds 1024 bytes")
+
     command = json.loads(payload)
-    if not isinstance(command, dict) or command.get("screen") not in PAGES:
-        raise ValueError("screen must be ip, environment, gas or frame")
+    if not isinstance(command, dict) or command.get("mode") not in PAGES:
+        raise ValueError("mode must be ip, environment, gas or frame")
+
     request_id = command.get("request_id")
     if request_id is not None and (
         not isinstance(request_id, str) or len(request_id) > 80
     ):
         raise ValueError("request_id must be a string of at most 80 characters")
-    return command["screen"], request_id
+
+    return command["mode"], request_id
 
 
 def load_snapshot(path, now):

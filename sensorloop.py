@@ -9,7 +9,7 @@ When the broker runs on this same Pi instead:
 Requires the existing sensor libraries and paho-mqtt >= 2.
 CSV retains the original flat fields. MQTT follows the GCS README schema.
 Gas values are estimates using the supplied constants, not verified calibration.
-Gas telemetry is null for the first 15 minutes; the receiver must handle null
+Gas telemetry is null for the first few minutes; the receiver must handle null
 as unavailable, not zero. CSV keeps raw measurements and provisional estimates.
 Disconnected samples stay in CSV; they are not replayed to the live dashboard.
 Also writes a local RAM snapshot for the separate lcdcontroller.py process.
@@ -26,11 +26,11 @@ import uuid
 import signal
 from datetime import datetime, timezone
 
-MQTT_BROKER = "10.88.35.39"
+MQTT_BROKER = "10.88.42.26"
 MQTT_PORT = 1883
 MQTT_TOPIC = "gcs/telemetry"
 COMP_FACTOR = 2.25  # Existing provisional temperature correction, unchanged.
-GAS_WARMUP_SECONDS = 15 * 60
+GAS_WARMUP_SECONDS = 2 * 60
 READ_INTERVAL_SECONDS = 1
 READ_RETRIES = 3
 RETRY_DELAY_SECONDS = 0.2
@@ -271,7 +271,7 @@ def main():
         last_offline_notice = -math.inf
         print(f"Starting sensor loop. CSV: {LOG_PATH}")
         print(f"LCD snapshot: {args.snapshot}; move hand away first, then approach")
-        print("Gas telemetry is null during the 15-minute warm-up. Ctrl+C stops.")
+        print("Gas telemetry is null during the warm-up. Ctrl+C stops.")
         while True:
             loop_start = time.monotonic()
             reading = {"timestamp": datetime.now(timezone.utc).isoformat()}
