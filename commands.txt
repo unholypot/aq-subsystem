@@ -1,0 +1,2 @@
+~/.virtualenvs/pimoroni/bin/python3 -u ~/aq-subsystem/lcdcontroller.py
+~/.virtualenvs/pimoroni/bin/python3 -u ~/aq-subsystem/lcdcontroller.py
